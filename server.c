@@ -9,16 +9,18 @@
 #include <time.h>
 #include "typeDef.h"
 
+const int GRID_SIZE = 10;
+
 char* id=0;
 short port=0;
 
 int sock = 0; //communication socket
 
-char* gridToString(struct Cell grid[10][10]) {
+char* gridToString(struct Cell grid[GRID_SIZE][GRID_SIZE]) {
     static char gridStr[201]; // 100 cells + 100 spaces + 20 newline characters + 1 null terminator
     int index = 0;
-    for(int i = 0; i < 10; i++) {
-        for(int j = 0; j < 10; j++) {
+    for(int i = 0; i < GRID_SIZE; i++) {
+        for(int j = 0; j < GRID_SIZE; j++) {
             gridStr[index++] = grid[i][j].aState;
             gridStr[index++] = ' '; // Adding a space after each character
         }
@@ -26,6 +28,137 @@ char* gridToString(struct Cell grid[10][10]) {
     }
     gridStr[index] = '\0';
     return gridStr;
+}
+
+void handleClientCommunication(int sock_pipe, struct sockaddr_in client, struct Cell grid[GRID_SIZE][GRID_SIZE], int* nbShipSunk, bool* win, tuple direction[4], int nbShips, char* argv[]) {
+    char buf_read[1<<8], buf_write[1<<8];
+    int ret;
+
+    // coordinates from client
+    ret=read(sock_pipe, buf_read, 256);
+    // handling errors related to reading from client
+    if (ret<=0) {
+        printf("%s: read=%d: %s\n",argv[0],ret,
+               strerror(errno));
+        return;
+    }
+
+    printf("server %s received from client (%s,%4d) : %s\n", id, inet_ntoa(client.sin_addr), ntohs(client.sin_port),buf_read);
+    int tirX = 0;
+    int tirY = 0;
+    sscanf(buf_read, "(%d %d)", &tirX, &tirY);
+    tirX--;
+    tirY--;
+
+    if(!(tirX >= 10 || tirY >= 10 || tirX < 0 || tirY < 0)){
+        if(grid[tirX][tirY].aState == UNSHOT){
+            if(grid[tirX][tirY].aShip == NONE){
+                grid[tirX][tirY].aState = MISS;
+                //responding to client
+                sprintf(buf_write,"Miss\n");
+            }
+            else{
+                grid[tirX][tirY].aState = HIT;
+
+                //checking if boat is sunk
+                int orientation = 0;
+                for(int i = 0; i < 4; i++){
+                    if(grid[tirX + direction[i].x][tirY + direction[i].y].aShip == grid[tirX][tirY].aShip){
+                        orientation = i;
+                    }
+                }
+                int tirXBis = tirX;
+                int tirYBis = tirY;
+                int counter = 0;
+                while(grid[tirXBis - direction[orientation].x][tirYBis - direction[orientation].y].aShip == grid[tirX][tirY].aShip){
+                    tirXBis -= direction[orientation].x;
+                    tirYBis -= direction[orientation].y;
+                }
+                for(int i = 0; i < grid[tirX][tirY].aShip; i++){
+                    if(grid[tirXBis][tirYBis].aState == HIT){
+                        counter++;
+                    }
+                    tirXBis += direction[orientation].x;
+                    tirYBis += direction[orientation].y;
+                }
+                if(counter == grid[tirX][tirY].aShip){
+                    nbShipSunk ++;
+                    // testing if all ships are sunk
+                    if(nbShipSunk == nbShips){
+                        win = true;
+                        sprintf(buf_write,"Hit, sunk\n You won!\n");
+                    }
+                    else{
+                        //responding to client
+                        sprintf(buf_write,"Hit, sunk !\n");
+                    }
+
+                    //change the state of cells to SUNK where a boat is sunk
+                    tirXBis = tirX;
+                    tirYBis = tirY;
+                    for(int i = 0; i < grid[tirX][tirY].aShip; i++){
+                        grid[tirXBis][tirYBis].aState = SUNK;
+                        tirXBis += direction[orientation].x;
+                        tirYBis += direction[orientation].y;
+                    }
+                }
+                else{
+                    //responding to client
+                    sprintf(buf_write, "Hit !\n");
+                }
+            }
+        }
+        else{
+            //responding to client
+            sprintf(buf_write,"%s","You already shot there\n");
+        }
+    }
+    else{
+        //responding to client
+        sprintf(buf_write,"%s","Invalid Coordinates\n");
+    }
+
+    //sending response to client
+    ret=write(sock_pipe, buf_write, strlen(buf_write));
+
+    char confirm_buf[1];
+    //Wait for confirmation from client
+    ret=read(sock_pipe, confirm_buf, 1);
+    if (ret<=0) {
+        printf("%s: read=%d: %s\n",argv[0],ret,
+               strerror(errno));
+        return;
+    }
+
+    //Check if anything was received from the client
+    if (ret > 0) {
+        printf("Received confirmation from client\n");
+    } else {
+        printf("Did not receive confirmation from client\n");
+        return;
+    }
+
+    //sending grid to client
+    char* gridStr = gridToString(grid);
+    ret=write(sock_pipe, gridStr, strlen(gridStr));
+
+    if (ret<=0) {
+        printf("%s: write=%d: %s\n",argv[0],ret,
+               strerror(errno));
+        return;
+    }
+
+    //printing grid
+    for(int i = 0; i < 10 ; i++){
+        for(int y = 0; y < 10; y++){
+            if(grid[i][y].aShip == NONE || grid[i][y].aState != UNSHOT){
+                printf("%c ", grid[i][y].aState);
+            }
+            else printf("%d ", grid[i][y].aShip);
+        }
+        printf("\n");
+    }
+    printf("\n");
 }
 
 int main(int argc, char** argv)
@@ -83,9 +216,9 @@ int main(int argc, char** argv)
         if(f == 0){
             // preparing grids
             /*------------------------------------------*/
-            struct Cell grid1[10][10], grid2[10][10];
-            for(int i = 0; i < 10 ; i++){
-                for(int j = 0; j < 10; j++){
+            struct Cell grid1[GRID_SIZE][GRID_SIZE], grid2[GRID_SIZE][GRID_SIZE];
+            for(int i = 0; i < GRID_SIZE ; i++){
+                for(int j = 0; j < GRID_SIZE; j++){
                     grid1[i][j].aShip = NONE;
                     grid1[i][j].aState = UNSHOT;
                     grid2[i][j].aShip = NONE;
@@ -100,19 +233,19 @@ int main(int argc, char** argv)
             enum Ship shipToPlace;
             // Place ships on grids
             for(int gridIndex = 0; gridIndex < 2; gridIndex++) {
-                struct Cell (*grid)[10][10] = gridIndex == 0 ? &grid1 : &grid2;
+                struct Cell (*grid)[GRID_SIZE][GRID_SIZE] = gridIndex == 0 ? &grid1 : &grid2;
                 for(int shipType = CARRIER; shipType >= DESTROYER; shipType--) {
                     for(int shipCount = 0; shipCount < (shipType == SUBMARINE ? 2 : 1); shipCount++) {
                         bool placed = false;
                         while(!placed) {
-                            int x = rand() % 10;
-                            int y = rand() % 10;
+                            int x = rand() % GRID_SIZE;
+                            int y = rand() % GRID_SIZE;
                             int direction = rand() % 4; // 0: right, 1: down, 2: left, 3: up
                             placed = true;
                             for(int i = 0; i < shipType; i++) {
                                 int shipX = x + (direction == 0 ? i : direction == 2 ? -i : 0);
                                 int shipY = y + (direction == 1 ? i : direction == 3 ? -i : 0);
-                                if(shipX < 0 || shipX >= 10 || shipY < 0 || shipY >= 10 || (*grid)[shipX][shipY].aShip != NONE) {
+                                if(shipX < 0 || shipX >= GRID_SIZE || shipY < 0 || shipY >= GRID_SIZE || (*grid)[shipX][shipY].aShip != NONE) {
                                     placed = false;
                                     break;
                                 }
@@ -130,8 +263,8 @@ int main(int argc, char** argv)
             }
 
             //printing grids
-            for(int i = 0; i < 10 ; i++){
-                for(int y = 0; y < 10; y++){
+            for(int i = 0; i < GRID_SIZE ; i++){
+                for(int y = 0; y < GRID_SIZE; y++){
                     if(grid1[i][y].aShip == NONE && grid1[i][y].aState == UNSHOT){
                         printf("%c ", grid1[i][y].aState);
                     }
@@ -141,8 +274,8 @@ int main(int argc, char** argv)
             }
             printf("\n");
 
-            for(int i = 0; i < 10 ; i++){
-                for(int y = 0; y < 10; y++){
+            for(int i = 0; i < GRID_SIZE ; i++){
+                for(int y = 0; y < GRID_SIZE; y++){
                     if(grid2[i][y].aShip == NONE && grid2[i][y].aState == UNSHOT){
                         printf("%c ", grid2[i][y].aState);
                     }
@@ -151,264 +284,17 @@ int main(int argc, char** argv)
                 printf("\n");
             }
             printf("\n");
+
+
             /*------------------------------------------*/
             bool win = false;
             int nbShipSunk1 = 0, nbShipSunk2 = 0;
             while (!win) {
-                char buf_read1[1<<8], buf_write1[1<<8];
-                char buf_read2[1<<8], buf_write2[1<<8];
-                // coordinates from client
-                ret=read(sock_pipe1, buf_read1, 256);
-                // handling errors related to reading from client
-                if (ret<=0) {
-                    printf("%s: read=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    break;
-                }
 
-                printf("server %s received from client 1 (%s,%4d) : %s\n", id, inet_ntoa(client1.sin_addr), ntohs(client1.sin_port),buf_read1);
-                int tirX = 0;
-                int tirY = 0;
-                sscanf(buf_read1, "(%d %d)", &tirX, &tirY);
-                tirX--;
-                tirY--;
+                handleClientCommunication(sock_pipe1, client1, grid2, &nbShipSunk2, &win, direction, nbShips, argv);
 
-                if(!(tirX >= 10 || tirY >= 10 || tirX < 0 || tirY < 0)){
-                    if(grid2[tirX][tirY].aState == UNSHOT){
-                        if(grid2[tirX][tirY].aShip == NONE){
-                            grid2[tirX][tirY].aState = MISS;
-                            //responding to client
-                            sprintf(buf_write1,"Miss\n");
-                        }
-                        else{
-                            grid2[tirX][tirY].aState = HIT;
+                handleClientCommunication(sock_pipe2, client2, grid1, &nbShipSunk1, &win, direction, nbShips, argv);
 
-                            //checking if boat is sunk
-                            int orientation = 0;
-                            for(int i = 0; i < 4; i++){
-                                if(grid2[tirX + direction[i].x][tirY + direction[i].y].aShip == grid2[tirX][tirY].aShip){
-                                    orientation = i;
-                                }
-                            }
-                            int tirXBis = tirX;
-                            int tirYBis = tirY;
-                            int counter = 0;
-                            while(grid2[tirXBis - direction[orientation].x][tirYBis - direction[orientation].y].aShip == grid2[tirX][tirY].aShip){
-                                tirXBis -= direction[orientation].x;
-                                tirYBis -= direction[orientation].y;
-                            }
-                            for(int i = 0; i < grid2[tirX][tirY].aShip; i++){
-                                if(grid2[tirXBis][tirYBis].aState == HIT){
-                                    counter++;
-                                }
-                                tirXBis += direction[orientation].x;
-                                tirYBis += direction[orientation].y;
-                            }
-                            if(counter == grid2[tirX][tirY].aShip){
-                                nbShipSunk2 ++;
-                                // testing if all ships are sunk
-                                if(nbShipSunk2 == nbShips){
-                                    win = true;
-                                    sprintf(buf_write1,"Hit, sunk\n You won!\n");
-                                }
-                                else{
-                                    //responding to client
-                                    sprintf(buf_write1,"Hit, sunk !\n");
-                                }
-
-                                //change the state of cells to SUNK where a boat is sunk
-                                tirXBis = tirX;
-                                tirYBis = tirY;
-                                for(int i = 0; i < grid2[tirX][tirY].aShip; i++){
-                                    grid2[tirXBis][tirYBis].aState = SUNK;
-                                    tirXBis += direction[orientation].x;
-                                    tirYBis += direction[orientation].y;
-                                }
-                            }
-                            else{
-                                //responding to client
-                                sprintf(buf_write1, "Hit !\n");
-                            }
-                        }
-                    }
-                    else{
-                        //responding to client
-                        sprintf(buf_write1,"%s","You already shot there\n");
-                    }
-                }
-                else{
-                    //responding to client
-                    sprintf(buf_write1,"%s","Invalid Coordinates\n");
-                }
-
-                //sending response to client
-                ret=write(sock_pipe1, buf_write1, strlen(buf_write1));
-
-                char confirm_buf[1];
-                //Wait for confirmation from client
-                ret=read(sock_pipe1, confirm_buf, 1);
-                if (ret<=0) {
-                    printf("%s: read=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    continue;
-                }
-
-                //Check if anything was received from the client
-                if (ret > 0) {
-                    printf("Received confirmation from client\n");
-                } else {
-                    printf("Did not receive confirmation from client\n");
-                    continue;
-                }
-
-                //sending grid to client
-                char* gridStr2 = gridToString(grid2);
-                ret=write(sock_pipe1, gridStr2, strlen(gridStr2));
-
-                if (ret<=0) {
-                    printf("%s: write=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    break;
-                }
-
-                //printing grid
-                for(int i = 0; i < 10 ; i++){
-                    for(int y = 0; y < 10; y++){
-                        if(grid2[i][y].aShip == NONE || grid2[i][y].aState != UNSHOT){
-                            printf("%c ", grid2[i][y].aState);
-                        }
-                        else printf("%d ", grid2[i][y].aShip);
-                    }
-                    printf("\n");
-                }
-                printf("\n");
-
-                // coordinates from client2
-                ret=read(sock_pipe2, buf_read2, 256);
-
-                // handling errors related to reading from client
-                if (ret<=0) {
-                    printf("%s: read=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    break;
-                }
-
-                printf("server %s received from client 2 (%s,%4d) : %s\n", id, inet_ntoa(client2.sin_addr), ntohs(client2.sin_port),buf_read2);
-                tirX = 0;
-                tirY = 0;
-                sscanf(buf_read2, "(%d %d)", &tirX, &tirY);
-                tirX--;
-                tirY--;
-
-                if(!(tirX >= 10 || tirY >= 10 || tirX < 0 || tirY < 0)){
-                    if(grid1[tirX][tirY].aState == UNSHOT){
-                        if(grid1[tirX][tirY].aShip == NONE){
-                            grid1[tirX][tirY].aState = MISS;
-                            //responding to client
-                            sprintf(buf_write2,"Miss\n");
-                        }
-                        else{
-                            grid1[tirX][tirY].aState = HIT;
-
-                            //checking if boat is sunk
-                            int orientation = 0;
-                            for(int i = 0; i < 4; i++){
-                                if(grid1[tirX + direction[i].x][tirY + direction[i].y].aShip == grid1[tirX][tirY].aShip){
-                                    orientation = i;
-                                }
-                            }
-                            int tirXBis = tirX;
-                            int tirYBis = tirY;
-                            int counter = 0;
-                            while(grid1[tirXBis - direction[orientation].x][tirYBis - direction[orientation].y].aShip == grid1[tirX][tirY].aShip){
-                                tirXBis -= direction[orientation].x;
-                                tirYBis -= direction[orientation].y;
-                            }
-                            for(int i = 0; i < grid1[tirX][tirY].aShip; i++){
-                                if(grid1[tirXBis][tirYBis].aState == HIT){
-                                    counter++;
-                                }
-                                tirXBis += direction[orientation].x;
-                                tirYBis += direction[orientation].y;
-                            }
-                            if(counter == grid1[tirX][tirY].aShip){
-                                nbShipSunk2 ++;
-                                // testing if all ships are sunk
-                                if(nbShipSunk2 == nbShips){
-                                    win = true;
-                                    sprintf(buf_write2,"Hit, sunk\n You won!\n");
-                                }
-                                else{
-                                    //responding to client
-                                    sprintf(buf_write2,"Hit, sunk !\n");
-                                }
-
-                                //change the state of cells to SUNK where a boat is sunk
-                                tirXBis = tirX;
-                                tirYBis = tirY;
-                                for(int i = 0; i < grid1[tirX][tirY].aShip; i++){
-                                    grid1[tirXBis][tirYBis].aState = SUNK;
-                                    tirXBis += direction[orientation].x;
-                                    tirYBis += direction[orientation].y;
-                                }
-                            }
-                            else{
-                                //responding to client
-                                sprintf(buf_write2, "Hit !\n");
-                            }
-                        }
-                    }
-                    else{
-                        //responding to client
-                        sprintf(buf_write2,"%s","You already shot there\n");
-                    }
-                }
-                else{
-                    //responding to client
-                    sprintf(buf_write2,"%s","Invalid Coordinates\n");
-                }
-
-                //sending response to client
-                ret=write(sock_pipe2, buf_write2, strlen(buf_write2));
-
-                //char confirm_buf[1];
-                //Wait for confirmation from client
-                ret=read(sock_pipe2, confirm_buf, 1);
-                if (ret<=0) {
-                    printf("%s: read=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    continue;
-                }
-
-                //Check if anything was received from the client
-                if (ret > 0) {
-                    printf("Received confirmation from client\n");
-                } else {
-                    printf("Did not receive confirmation from client\n");
-                    continue;
-                }
-
-                //sending grid to client
-                char* gridStr1 = gridToString(grid1);
-                ret=write(sock_pipe2, gridStr1, strlen(gridStr1));
-
-                if (ret<=0) {
-                    printf("%s: write=%d: %s\n",argv[0],ret,
-                           strerror(errno));
-                    break;
-                }
-
-                //printing grid
-                for(int i = 0; i < 10 ; i++){
-                    for(int y = 0; y < 10; y++){
-                        if(grid1[i][y].aShip == NONE || grid1[i][y].aState != UNSHOT){
-                            printf("%c ", grid1[i][y].aState);
-                        }
-                        else printf("%d ", grid1[i][y].aShip);
-                    }
-                    printf("\n");
-                }
-                printf("\n");
 
                 sleep(2);
             }
